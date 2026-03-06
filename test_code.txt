@@ -1,0 +1,9 @@
+string raw_data = input();      
+string processed = raw_data;   
+string final_output = processed; 
+
+render(final_output);          
+
+sanitize(processed);          
+string safe_data = processed; 
+render(safe_data);            

@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>XSS Test</title>
+</head>
+<body>
+
+    <h2>Search Page</h2>
+
+    <form method="GET">
+        <input type="text" name="q" placeholder="Search here">
+        <button type="submit">Search</button>
+    </form>
+
+    <p>Results for: 
+        <span id="output"></span>
+    </p>
+
+    <script>
+        const params = new URLSearchParams(window.location.search);
+        const userInput = params.get("q");
+
+        // Vulnerable line
+        document.getElementById("output").innerHTML = userInput;
+    </script>
+
+
+</body>
+</html>
+<!-- C:\Users\Hp\Downloads\win_flex_bison-2.5.25\win_bison.exe -d parser.y -->
+ <!-- C:\Users\Hp\Downloads\win_flex_bison-2.5.25\win_flex.exe lexer.l -->
+  <!-- g++ lex.yy.c parser.tab.c -o xss_analyzer.exe -->
+   <!-- Get-Content "test_code.txt" | ./xss_analyzer.exe -->
