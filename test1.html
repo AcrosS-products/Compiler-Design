@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Case 1 - URL Parameter XSS</title>
+</head>
+<body>
+    <h2>Search Results</h2>
+    <div id="result"></div>
+    <div id="preview"></div>
+    <div id="banner"></div>
+
+    <script>
+        const params = new URLSearchParams(window.location.search);
+        const userInput = params.get("q");
+        const displayVal = userInput;
+        document.getElementById("result").innerHTML = displayVal;
+        eval(userInput);
+    </script>
+</body>
+</html>

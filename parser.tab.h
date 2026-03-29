@@ -55,14 +55,40 @@ extern int yydebug;
     YYerror = 256,                 /* error  */
     YYUNDEF = 257,                 /* "invalid token"  */
     IDENTIFIER = 258,              /* IDENTIFIER  */
-    STRING_TYPE = 259,             /* STRING_TYPE  */
-    INPUT_FUNC = 260,              /* INPUT_FUNC  */
-    RENDER_FUNC = 261,             /* RENDER_FUNC  */
-    SANITIZE_FUNC = 262,           /* SANITIZE_FUNC  */
-    ASSIGN = 263,                  /* ASSIGN  */
-    SEMICOLON = 264,               /* SEMICOLON  */
-    LPAREN = 265,                  /* LPAREN  */
-    RPAREN = 266                   /* RPAREN  */
+    STRING_LITERAL = 259,          /* STRING_LITERAL  */
+    TEMPLATE_LITERAL = 260,        /* TEMPLATE_LITERAL  */
+    HTML_TEXT = 261,               /* HTML_TEXT  */
+    HTML_CHAR = 262,               /* HTML_CHAR  */
+    SCRIPT_START = 263,            /* SCRIPT_START  */
+    SCRIPT_END = 264,              /* SCRIPT_END  */
+    VAR_DECL = 265,                /* VAR_DECL  */
+    NEW_TOK = 266,                 /* NEW_TOK  */
+    URL_SEARCH_PARAMS = 267,       /* URL_SEARCH_PARAMS  */
+    WIN_LOC_SEARCH = 268,          /* WIN_LOC_SEARCH  */
+    LOCAL_STORAGE = 269,           /* LOCAL_STORAGE  */
+    SESSION_STORAGE = 270,         /* SESSION_STORAGE  */
+    DOC_COOKIE = 271,              /* DOC_COOKIE  */
+    DOT_GET = 272,                 /* DOT_GET  */
+    DOT_GET_ITEM = 273,            /* DOT_GET_ITEM  */
+    DOC_GET_ID = 274,              /* DOC_GET_ID  */
+    DOC_QUERY_SEL = 275,           /* DOC_QUERY_SEL  */
+    DOC_GET_ELEM_BY_ID = 276,      /* DOC_GET_ELEM_BY_ID  */
+    DOT_INNER_HTML = 277,          /* DOT_INNER_HTML  */
+    DOT_OUTER_HTML = 278,          /* DOT_OUTER_HTML  */
+    DOT_HREF = 279,                /* DOT_HREF  */
+    EVAL_TOK = 280,                /* EVAL_TOK  */
+    DOC_WRITE = 281,               /* DOC_WRITE  */
+    DOC_WRITELN = 282,             /* DOC_WRITELN  */
+    ASSIGN = 283,                  /* ASSIGN  */
+    ASSIGN_PLUS = 284,             /* ASSIGN_PLUS  */
+    PLUS = 285,                    /* PLUS  */
+    SEMICOLON = 286,               /* SEMICOLON  */
+    LPAREN = 287,                  /* LPAREN  */
+    RPAREN = 288,                  /* RPAREN  */
+    IF_TOK = 289,                  /* IF_TOK  */
+    LBRACE = 290,                  /* LBRACE  */
+    RBRACE = 291,                  /* RBRACE  */
+    LOCATION_HREF = 292            /* LOCATION_HREF  */
   };
   typedef enum yytokentype yytoken_kind_t;
 #endif
@@ -71,11 +97,10 @@ extern int yydebug;
 #if ! defined YYSTYPE && ! defined YYSTYPE_IS_DECLARED
 union YYSTYPE
 {
-#line 38 "parser.y"
+#line 99 "parser.y"
+ char* str; 
 
-    char* str;
-
-#line 79 "parser.tab.h"
+#line 104 "parser.tab.h"
 
 };
 typedef union YYSTYPE YYSTYPE;

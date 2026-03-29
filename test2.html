@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Case 2 - localStorage XSS</title>
+</head>
+<body>
+    <h2>User Profile</h2>
+    <div id="username"></div>
+    <div id="bio"></div>
+
+    <script>
+        const store = localStorage;
+        const userName = store.getItem("name");
+        const userBio = userName;
+        document.getElementById("username").innerHTML = userName;
+        document.getElementById("bio").outerHTML = userBio;
+        document.write(userName);
+    </script>
+</body>
+</html>

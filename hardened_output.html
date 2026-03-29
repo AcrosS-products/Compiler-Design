@@ -16,13 +16,14 @@
         <span id="output"></span>
     </p>
 
-    <script>
-        const params = new URLSearchParams(window.location.search);
-        const userInput = params.get("q");
+    
+<script>
+  const params = new URLSearchParams(window.location.search);
+  const userInput = params.get("q");
+  document.getElementById("output").textContent = userInput; // AUTO-FIXED: innerHTML → textContent
 
-        // Vulnerable line
-        document.getElementById("output").innerHTML = userInput;
-    </script>
+</script>
+
 
 
 </body>

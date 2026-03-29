@@ -69,41 +69,102 @@
 /* First part of user prologue.  */
 #line 1 "parser.y"
 
+/*
+ * XSS Detection & Auto-Sanitization Compiler
+ * Parser: parser.y
+ *
+ * Risk levels
+ *   0 = clean / untainted
+ *   1 = source  (URLSearchParams, localStorage, sessionStorage, document.cookie)
+ *   2 = tainted (propagated from a level-1 variable via .get / .getItem / concat)
+ *   3 = confirmed sink hit with tainted data → auto-remediated
+ *
+ * Scoring
+ *   Start at 100.
+ *   Each CRITICAL (tainted → dangerous sink)  costs 40 points.
+ *   Each WARNING  (tainted concat or template) costs 10 points.
+ *   Floor at 0.
+ *
+ * Output
+ *   hardened_output.html   – rewritten source with safe API substitutions
+ *   Stdout lines parsed by the Python UI:
+ *     SCORE:<n>
+ *     [CRITICAL] ...
+ *     [WARNING]  ...
+ *     [INFO]     ...
+ */
+
 #include <iostream>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <map>
 #include <vector>
-#include <cstring>
-
 using namespace std;
 
-// --- GLOBAL SECURITY STRUCTURES ---
-map<string, int> risk_table;    // 0=Safe, 1=Propagated, 2=Direct Input
-int current_expr_risk = 0;
-vector<string> audit_log;       // Persistent history for Week 8 Feature
+/* ── Taint bookkeeping ─────────────────────────────────────────────────── */
+map<string, int>    risk_map;      // variable name → risk level (0-2)
+map<string, string> origin_map;    // variable name → human description of origin
 
-// External function prototypes
+/* ── Output buffers ────────────────────────────────────────────────────── */
+vector<string> full_doc;           // rewritten HTML document lines
+vector<string> audit_logs;         // structured audit entries
+
+/* ── Counters ──────────────────────────────────────────────────────────── */
+int criticals = 0;
+int warnings  = 0;
+
+/* ── Helpers ───────────────────────────────────────────────────────────── */
 extern int yylex();
-void yyerror(const char *s);
+extern int yylineno_js;
 
-// Helper to log events to the final report
-void log_event(string msg) {
-    audit_log.push_back(msg);
-    cout << "[AUDIT] " << msg << endl;
+void yyerror(const char* s) {
+    // Silent: keep reconstruction moving even on partial parses
 }
 
-// AI-Assisted Heuristic Fix Suggestion
-void suggest_fix(string var_name, int risk) {
-    cout << "\n--------------------------------------------------" << endl;
-    cout << "[AI SECURITY ASSISTANT - REMEDIATION ADVICE]" << endl;
-    cout << "Vulnerability: Cross-Site Scripting (XSS)" << endl;
-    cout << "Severity: " << (risk == 2 ? "CRITICAL" : "HIGH") << endl;
-    cout << "Root Cause: Variable '" << var_name << "' contains unvalidated web input." << endl;
-    cout << "Recommended Action: Apply context-aware encoding using: sanitize(" << var_name << ");" << endl;
-    cout << "--------------------------------------------------\n" << endl;
+void emit(const string& s) {
+    full_doc.push_back(s);
 }
 
-#line 107 "parser.tab.c"
+void log_critical(const string& msg) {
+    criticals++;
+    audit_logs.push_back("[CRITICAL] " + msg);
+}
+
+void log_warning(const string& msg) {
+    warnings++;
+    audit_logs.push_back("[WARNING]  " + msg);
+}
+
+void log_info(const string& msg) {
+    audit_logs.push_back("[INFO]     " + msg);
+}
+
+/* Return a safe API replacement string for a known dangerous sink */
+string safe_sink(const string& sink_prop, const string& target_id,
+                 const string& var_name, const string& elem_expr) {
+    if (sink_prop == ".innerHTML" || sink_prop == ".outerHTML") {
+        // Prefer textContent for simple display; recommend DOMPurify comment for rich HTML
+        return elem_expr + ".textContent = " + var_name
+               + "; // AUTO-FIXED: innerHTML → textContent";
+    }
+    if (sink_prop == ".href") {
+        return "/* AUTO-FIXED: unsafe href assignment blocked for tainted var '"
+               + var_name + "' */";
+    }
+    if (sink_prop == "eval") {
+        return "/* AUTO-FIXED: eval() blocked for tainted var '"
+               + var_name + "' */";
+    }
+    if (sink_prop == "document.write" || sink_prop == "document.writeln") {
+        return "/* AUTO-FIXED: " + sink_prop + "() blocked for tainted var '"
+               + var_name + "' */";
+    }
+    return "/* AUTO-FIXED: unsafe sink blocked */";
+}
+
+
+#line 168 "parser.tab.c"
 
 # ifndef YY_CAST
 #  ifdef __cplusplus
@@ -135,22 +196,45 @@ enum yysymbol_kind_t
   YYSYMBOL_YYerror = 1,                    /* error  */
   YYSYMBOL_YYUNDEF = 2,                    /* "invalid token"  */
   YYSYMBOL_IDENTIFIER = 3,                 /* IDENTIFIER  */
-  YYSYMBOL_STRING_TYPE = 4,                /* STRING_TYPE  */
-  YYSYMBOL_INPUT_FUNC = 5,                 /* INPUT_FUNC  */
-  YYSYMBOL_RENDER_FUNC = 6,                /* RENDER_FUNC  */
-  YYSYMBOL_SANITIZE_FUNC = 7,              /* SANITIZE_FUNC  */
-  YYSYMBOL_ASSIGN = 8,                     /* ASSIGN  */
-  YYSYMBOL_SEMICOLON = 9,                  /* SEMICOLON  */
-  YYSYMBOL_LPAREN = 10,                    /* LPAREN  */
-  YYSYMBOL_RPAREN = 11,                    /* RPAREN  */
-  YYSYMBOL_YYACCEPT = 12,                  /* $accept  */
-  YYSYMBOL_program = 13,                   /* program  */
-  YYSYMBOL_statements = 14,                /* statements  */
-  YYSYMBOL_statement = 15,                 /* statement  */
-  YYSYMBOL_declaration = 16,               /* declaration  */
-  YYSYMBOL_assignment = 17,                /* assignment  */
-  YYSYMBOL_expression = 18,                /* expression  */
-  YYSYMBOL_sink_call = 19                  /* sink_call  */
+  YYSYMBOL_STRING_LITERAL = 4,             /* STRING_LITERAL  */
+  YYSYMBOL_TEMPLATE_LITERAL = 5,           /* TEMPLATE_LITERAL  */
+  YYSYMBOL_HTML_TEXT = 6,                  /* HTML_TEXT  */
+  YYSYMBOL_HTML_CHAR = 7,                  /* HTML_CHAR  */
+  YYSYMBOL_SCRIPT_START = 8,               /* SCRIPT_START  */
+  YYSYMBOL_SCRIPT_END = 9,                 /* SCRIPT_END  */
+  YYSYMBOL_VAR_DECL = 10,                  /* VAR_DECL  */
+  YYSYMBOL_NEW_TOK = 11,                   /* NEW_TOK  */
+  YYSYMBOL_URL_SEARCH_PARAMS = 12,         /* URL_SEARCH_PARAMS  */
+  YYSYMBOL_WIN_LOC_SEARCH = 13,            /* WIN_LOC_SEARCH  */
+  YYSYMBOL_LOCAL_STORAGE = 14,             /* LOCAL_STORAGE  */
+  YYSYMBOL_SESSION_STORAGE = 15,           /* SESSION_STORAGE  */
+  YYSYMBOL_DOC_COOKIE = 16,                /* DOC_COOKIE  */
+  YYSYMBOL_DOT_GET = 17,                   /* DOT_GET  */
+  YYSYMBOL_DOT_GET_ITEM = 18,              /* DOT_GET_ITEM  */
+  YYSYMBOL_DOC_GET_ID = 19,                /* DOC_GET_ID  */
+  YYSYMBOL_DOC_QUERY_SEL = 20,             /* DOC_QUERY_SEL  */
+  YYSYMBOL_DOC_GET_ELEM_BY_ID = 21,        /* DOC_GET_ELEM_BY_ID  */
+  YYSYMBOL_DOT_INNER_HTML = 22,            /* DOT_INNER_HTML  */
+  YYSYMBOL_DOT_OUTER_HTML = 23,            /* DOT_OUTER_HTML  */
+  YYSYMBOL_DOT_HREF = 24,                  /* DOT_HREF  */
+  YYSYMBOL_EVAL_TOK = 25,                  /* EVAL_TOK  */
+  YYSYMBOL_DOC_WRITE = 26,                 /* DOC_WRITE  */
+  YYSYMBOL_DOC_WRITELN = 27,               /* DOC_WRITELN  */
+  YYSYMBOL_ASSIGN = 28,                    /* ASSIGN  */
+  YYSYMBOL_ASSIGN_PLUS = 29,               /* ASSIGN_PLUS  */
+  YYSYMBOL_PLUS = 30,                      /* PLUS  */
+  YYSYMBOL_SEMICOLON = 31,                 /* SEMICOLON  */
+  YYSYMBOL_LPAREN = 32,                    /* LPAREN  */
+  YYSYMBOL_RPAREN = 33,                    /* RPAREN  */
+  YYSYMBOL_IF_TOK = 34,                    /* IF_TOK  */
+  YYSYMBOL_LBRACE = 35,                    /* LBRACE  */
+  YYSYMBOL_RBRACE = 36,                    /* RBRACE  */
+  YYSYMBOL_LOCATION_HREF = 37,             /* LOCATION_HREF  */
+  YYSYMBOL_YYACCEPT = 38,                  /* $accept  */
+  YYSYMBOL_program = 39,                   /* program  */
+  YYSYMBOL_elements = 40,                  /* elements  */
+  YYSYMBOL_element = 41,                   /* element  */
+  YYSYMBOL_js_statement = 42               /* js_statement  */
 };
 typedef enum yysymbol_kind_t yysymbol_kind_t;
 
@@ -476,21 +560,21 @@ union yyalloc
 #endif /* !YYCOPY_NEEDED */
 
 /* YYFINAL -- State number of the termination state.  */
-#define YYFINAL  13
+#define YYFINAL  3
 /* YYLAST -- Last index in YYTABLE.  */
-#define YYLAST   33
+#define YYLAST   93
 
 /* YYNTOKENS -- Number of terminals.  */
-#define YYNTOKENS  12
+#define YYNTOKENS  38
 /* YYNNTS -- Number of nonterminals.  */
-#define YYNNTS  8
+#define YYNNTS  5
 /* YYNRULES -- Number of rules.  */
-#define YYNRULES  13
+#define YYNRULES  26
 /* YYNSTATES -- Number of states.  */
-#define YYNSTATES  31
+#define YYNSTATES  84
 
 /* YYMAXUTOK -- Last valid token kind.  */
-#define YYMAXUTOK   266
+#define YYMAXUTOK   292
 
 
 /* YYTRANSLATE(TOKEN-NUM) -- Symbol number corresponding to TOKEN-NUM
@@ -530,15 +614,19 @@ static const yytype_int8 yytranslate[] =
        2,     2,     2,     2,     2,     2,     2,     2,     2,     2,
        2,     2,     2,     2,     2,     2,     2,     2,     2,     2,
        2,     2,     2,     2,     2,     2,     1,     2,     3,     4,
-       5,     6,     7,     8,     9,    10,    11
+       5,     6,     7,     8,     9,    10,    11,    12,    13,    14,
+      15,    16,    17,    18,    19,    20,    21,    22,    23,    24,
+      25,    26,    27,    28,    29,    30,    31,    32,    33,    34,
+      35,    36,    37
 };
 
 #if YYDEBUG
 /* YYRLINE[YYN] -- Source line where rule number YYN was defined.  */
-static const yytype_int8 yyrline[] =
+static const yytype_int16 yyrline[] =
 {
-       0,    50,    50,    67,    68,    72,    73,    74,    78,    89,
-     100,   103,   108,   116
+       0,   121,   121,   145,   146,   150,   151,   152,   153,   154,
+     161,   170,   179,   188,   198,   209,   220,   231,   242,   253,
+     264,   269,   283,   296,   308,   319,   331
 };
 #endif
 
@@ -555,9 +643,15 @@ static const char *yysymbol_name (yysymbol_kind_t yysymbol) YY_ATTRIBUTE_UNUSED;
 static const char *const yytname[] =
 {
   "\"end of file\"", "error", "\"invalid token\"", "IDENTIFIER",
-  "STRING_TYPE", "INPUT_FUNC", "RENDER_FUNC", "SANITIZE_FUNC", "ASSIGN",
-  "SEMICOLON", "LPAREN", "RPAREN", "$accept", "program", "statements",
-  "statement", "declaration", "assignment", "expression", "sink_call", YY_NULLPTR
+  "STRING_LITERAL", "TEMPLATE_LITERAL", "HTML_TEXT", "HTML_CHAR",
+  "SCRIPT_START", "SCRIPT_END", "VAR_DECL", "NEW_TOK", "URL_SEARCH_PARAMS",
+  "WIN_LOC_SEARCH", "LOCAL_STORAGE", "SESSION_STORAGE", "DOC_COOKIE",
+  "DOT_GET", "DOT_GET_ITEM", "DOC_GET_ID", "DOC_QUERY_SEL",
+  "DOC_GET_ELEM_BY_ID", "DOT_INNER_HTML", "DOT_OUTER_HTML", "DOT_HREF",
+  "EVAL_TOK", "DOC_WRITE", "DOC_WRITELN", "ASSIGN", "ASSIGN_PLUS", "PLUS",
+  "SEMICOLON", "LPAREN", "RPAREN", "IF_TOK", "LBRACE", "RBRACE",
+  "LOCATION_HREF", "$accept", "program", "elements", "element",
+  "js_statement", YY_NULLPTR
 };
 
 static const char *
@@ -567,7 +661,7 @@ yysymbol_name (yysymbol_kind_t yysymbol)
 }
 #endif
 
-#define YYPACT_NINF (-8)
+#define YYPACT_NINF (-23)
 
 #define yypact_value_is_default(Yyn) \
   ((Yyn) == YYPACT_NINF)
@@ -581,10 +675,15 @@ yysymbol_name (yysymbol_kind_t yysymbol)
    STATE-NUM.  */
 static const yytype_int8 yypact[] =
 {
-       2,    -7,     0,    -1,     7,     2,    -8,    -8,    -8,    -8,
-      -3,     3,     9,    -8,    -8,    -8,     4,     5,     1,    -3,
-       6,     8,    10,    -8,    11,    12,    -8,    13,    -8,    -8,
-      -8
+     -23,     1,    -3,   -23,   -13,   -23,   -23,   -23,   -23,     5,
+     -22,   -20,   -15,   -11,    -9,   -23,   -23,     0,    27,    29,
+       7,    39,    41,    42,    43,    44,    45,    18,    19,    26,
+      20,    21,    22,    23,    28,    30,   -23,   -23,    -4,    40,
+      31,    32,    33,    16,    34,    35,    25,   -23,   -23,    36,
+      37,    47,   -23,    38,   -23,   -23,   -23,    46,    48,   -23,
+     -23,    -1,    53,    54,    49,    58,    64,    69,    50,    51,
+      52,   -23,    55,    56,    59,   -23,    60,    61,    62,   -23,
+     -23,   -23,   -23,   -23
 };
 
 /* YYDEFACT[STATE-NUM] -- Default reduction number in state STATE-NUM.
@@ -592,22 +691,27 @@ static const yytype_int8 yypact[] =
    means the default is an error.  */
 static const yytype_int8 yydefact[] =
 {
-       0,     0,     0,     0,     0,     2,     3,     5,     6,     7,
-       0,     0,     0,     1,     4,    11,     0,     0,     0,     0,
-       0,     0,     0,     9,     0,     0,    10,     0,     8,    13,
-      12
+       3,     0,     2,     1,     0,     5,     6,     7,     8,     0,
+       0,     0,     0,     0,     0,     4,     9,     0,     0,     0,
+       0,     0,     0,     0,     0,     0,     0,     0,     0,     0,
+       0,     0,     0,     0,     0,     0,    19,    17,     0,     0,
+       0,     0,     0,     0,     0,     0,     0,    26,    25,     0,
+       0,     0,    18,     0,    11,    12,    13,     0,     0,    23,
+      24,     0,     0,     0,     0,     0,     0,     0,     0,     0,
+       0,    16,     0,     0,     0,    20,     0,     0,     0,    21,
+      22,    14,    15,    10
 };
 
 /* YYPGOTO[NTERM-NUM].  */
 static const yytype_int8 yypgoto[] =
 {
-      -8,    -8,    -8,    17,    -8,    -8,    14,    -8
+     -23,   -23,   -23,   -23,    12
 };
 
 /* YYDEFGOTO[NTERM-NUM].  */
 static const yytype_int8 yydefgoto[] =
 {
-       0,     4,     5,     6,     7,     8,    18,     9
+       0,     1,     2,    15,    16
 };
 
 /* YYTABLE[YYPACT[STATE-NUM]] -- What to do in state STATE-NUM.  If
@@ -615,42 +719,61 @@ static const yytype_int8 yydefgoto[] =
    number is the opposite.  If YYTABLE_NINF, syntax error.  */
 static const yytype_int8 yytable[] =
 {
-      15,    10,    16,    11,    17,     1,     2,    13,     3,    12,
-      23,    19,    20,    27,    21,    22,     0,    25,     0,    26,
-      28,    29,    14,     0,    30,     0,     0,     0,     0,     0,
-       0,     0,     0,    24
+       4,     3,     4,     5,     6,     7,     8,     9,    20,     9,
+      21,    17,    22,    49,    50,    18,    19,    23,    10,    25,
+      10,    24,    11,    12,    11,    12,    51,    52,    26,    38,
+      27,    13,    28,    13,    14,    29,    14,    39,    57,    58,
+      40,    41,    42,    30,    31,    32,    33,    34,    35,    36,
+      37,    64,    53,    43,    44,    45,    46,    69,    70,    47,
+      61,    48,    54,    55,    56,    59,    60,    73,    62,    63,
+      65,    72,    74,    68,    66,     0,    67,     0,     0,     0,
+      71,     0,     0,     0,    76,    77,    75,    79,    78,     0,
+      80,    81,    82,    83
 };
 
 static const yytype_int8 yycheck[] =
 {
-       3,     8,     5,     3,     7,     3,     4,     0,     6,    10,
-       9,     8,     3,     3,    10,    10,    -1,    11,    -1,    11,
-       9,     9,     5,    -1,    11,    -1,    -1,    -1,    -1,    -1,
-      -1,    -1,    -1,    19
+       3,     0,     3,     6,     7,     8,     9,    10,     3,    10,
+      32,    24,    32,    17,    18,    28,    29,    32,    21,    28,
+      21,    32,    25,    26,    25,    26,    30,    31,    28,     3,
+       3,    34,     3,    34,    37,    28,    37,    11,    22,    23,
+      14,    15,    16,     4,     3,     3,     3,     3,     3,    31,
+      31,     4,    12,    33,    33,    33,    33,     4,     4,    31,
+      35,    31,    31,    31,    31,    31,    31,     3,    32,    32,
+      32,    13,     3,    61,    28,    -1,    28,    -1,    -1,    -1,
+      31,    -1,    -1,    -1,    33,    33,    36,    31,    33,    -1,
+      31,    31,    31,    31
 };
 
 /* YYSTOS[STATE-NUM] -- The symbol kind of the accessing symbol of
    state STATE-NUM.  */
 static const yytype_int8 yystos[] =
 {
-       0,     3,     4,     6,    13,    14,    15,    16,    17,    19,
-       8,     3,    10,     0,    15,     3,     5,     7,    18,     8,
-       3,    10,    10,     9,    18,    11,    11,     3,     9,     9,
-      11
+       0,    39,    40,     0,     3,     6,     7,     8,     9,    10,
+      21,    25,    26,    34,    37,    41,    42,    24,    28,    29,
+       3,    32,    32,    32,    32,    28,    28,     3,     3,    28,
+       4,     3,     3,     3,     3,     3,    31,    31,     3,    11,
+      14,    15,    16,    33,    33,    33,    33,    31,    31,    17,
+      18,    30,    31,    12,    31,    31,    31,    22,    23,    31,
+      31,    35,    32,    32,     4,    32,    28,    28,    42,     4,
+       4,    31,    13,     3,     3,    36,    33,    33,    33,    31,
+      31,    31,    31,    31
 };
 
 /* YYR1[RULE-NUM] -- Symbol kind of the left-hand side of rule RULE-NUM.  */
 static const yytype_int8 yyr1[] =
 {
-       0,    12,    13,    14,    14,    15,    15,    15,    16,    17,
-      18,    18,    18,    19
+       0,    38,    39,    40,    40,    41,    41,    41,    41,    41,
+      42,    42,    42,    42,    42,    42,    42,    42,    42,    42,
+      42,    42,    42,    42,    42,    42,    42
 };
 
 /* YYR2[RULE-NUM] -- Number of symbols on the right-hand side of rule RULE-NUM.  */
 static const yytype_int8 yyr2[] =
 {
-       0,     2,     1,     1,     2,     1,     1,     1,     5,     4,
-       3,     1,     4,     5
+       0,     2,     1,     0,     2,     1,     1,     1,     1,     1,
+       9,     5,     5,     5,     9,     9,     7,     4,     5,     4,
+       7,     8,     8,     5,     5,     5,     4
 };
 
 
@@ -1113,94 +1236,291 @@ yyreduce:
   YY_REDUCE_PRINT (yyn);
   switch (yyn)
     {
-  case 2: /* program: statements  */
-#line 50 "parser.y"
+  case 2: /* program: elements  */
+#line 121 "parser.y"
                {
-        // WEEK 8 EXTERNAL FEATURE: Final Audit Report Summary
-        cout << "\n==========================================" << endl;
-        cout << "   FINAL COMPILATION SECURITY REPORT      " << endl;
-        cout << "==========================================" << endl;
-        if(audit_log.empty()) {
-            cout << "No security events recorded." << endl;
-        } else {
-            for(size_t i = 0; i < audit_log.size(); ++i) {
-                cout << i+1 << ". " << audit_log[i] << endl;
-            }
+        /* ── Write hardened output file ──────────────────────────────── */
+        ofstream out("hardened_output.html");
+        for (const auto& line : full_doc)
+            out << line;
+        out.close();
+
+        /* ── Compute score ───────────────────────────────────────────── */
+        int score = 100 - (criticals * 40) - (warnings * 10);
+        if (score < 0) score = 0;
+
+        /* ── Emit for Python UI ──────────────────────────────────────── */
+        cout << "SCORE:" << score << endl;
+        for (const auto& entry : audit_logs)
+            cout << entry << endl;
+
+        /* ── Summary ─────────────────────────────────────────────────── */
+        cout << "[SUMMARY]  Criticals=" << criticals
+             << " Warnings=" << warnings
+             << " Score=" << score << endl;
+    }
+#line 1263 "parser.tab.c"
+    break;
+
+  case 5: /* element: HTML_TEXT  */
+#line 150 "parser.y"
+                   { emit(string((yyvsp[0].str))); }
+#line 1269 "parser.tab.c"
+    break;
+
+  case 6: /* element: HTML_CHAR  */
+#line 151 "parser.y"
+                   { emit(string((yyvsp[0].str))); }
+#line 1275 "parser.tab.c"
+    break;
+
+  case 7: /* element: SCRIPT_START  */
+#line 152 "parser.y"
+                   { emit("\n<script>\n"); }
+#line 1281 "parser.tab.c"
+    break;
+
+  case 8: /* element: SCRIPT_END  */
+#line 153 "parser.y"
+                   { emit("\n</script>\n"); }
+#line 1287 "parser.tab.c"
+    break;
+
+  case 10: /* js_statement: VAR_DECL IDENTIFIER ASSIGN NEW_TOK URL_SEARCH_PARAMS LPAREN WIN_LOC_SEARCH RPAREN SEMICOLON  */
+#line 161 "parser.y"
+                                                                                                  {
+        string name((yyvsp[-7].str));
+        risk_map[name]   = 1;
+        origin_map[name] = "URLSearchParams(window.location.search)";
+        log_info("Source identified: '" + name + "' ← URLSearchParams");
+        emit("  const " + name + " = new URLSearchParams(window.location.search);\n");
+    }
+#line 1299 "parser.tab.c"
+    break;
+
+  case 11: /* js_statement: VAR_DECL IDENTIFIER ASSIGN LOCAL_STORAGE SEMICOLON  */
+#line 170 "parser.y"
+                                                         {
+        string name((yyvsp[-3].str));
+        risk_map[name]   = 1;
+        origin_map[name] = "localStorage";
+        log_info("Source identified: '" + name + "' ← localStorage");
+        emit("  const " + name + " = localStorage;\n");
+    }
+#line 1311 "parser.tab.c"
+    break;
+
+  case 12: /* js_statement: VAR_DECL IDENTIFIER ASSIGN SESSION_STORAGE SEMICOLON  */
+#line 179 "parser.y"
+                                                           {
+        string name((yyvsp[-3].str));
+        risk_map[name]   = 1;
+        origin_map[name] = "sessionStorage";
+        log_info("Source identified: '" + name + "' ← sessionStorage");
+        emit("  const " + name + " = sessionStorage;\n");
+    }
+#line 1323 "parser.tab.c"
+    break;
+
+  case 13: /* js_statement: VAR_DECL IDENTIFIER ASSIGN DOC_COOKIE SEMICOLON  */
+#line 188 "parser.y"
+                                                      {
+        string name((yyvsp[-3].str));
+        risk_map[name]   = 1;
+        origin_map[name] = "document.cookie";
+        log_warning("Source identified: '" + name
+                    + "' ← document.cookie (high sensitivity)");
+        emit("  const " + name + " = document.cookie;\n");
+    }
+#line 1336 "parser.tab.c"
+    break;
+
+  case 14: /* js_statement: VAR_DECL IDENTIFIER ASSIGN IDENTIFIER DOT_GET LPAREN STRING_LITERAL RPAREN SEMICOLON  */
+#line 198 "parser.y"
+                                                                                           {
+        string dest((yyvsp[-7].str)), src((yyvsp[-5].str)), key((yyvsp[-2].str));
+        if (risk_map[src] >= 1) {
+            risk_map[dest]   = 2;
+            origin_map[dest] = "'" + src + "'.get(" + key + ")";
+            log_info("Taint propagated: '" + dest + "' ← " + origin_map[dest]);
         }
-        cout << "==========================================\n" << endl;
+        emit("  const " + dest + " = " + src + ".get(" + key + ");\n");
     }
-#line 1133 "parser.tab.c"
+#line 1350 "parser.tab.c"
     break;
 
-  case 8: /* declaration: STRING_TYPE IDENTIFIER ASSIGN expression SEMICOLON  */
-#line 78 "parser.y"
-                                                       {
-        risk_table[(yyvsp[-3].str)] = current_expr_risk;
-        if(current_expr_risk > 0) 
-            log_event("Variable '" + string((yyvsp[-3].str)) + "' initialized with Risk Level " + to_string(current_expr_risk));
-        else
-            log_event("Variable '" + string((yyvsp[-3].str)) + "' initialized as SAFE.");
-        current_expr_risk = 0;
-    }
-#line 1146 "parser.tab.c"
-    break;
-
-  case 9: /* assignment: IDENTIFIER ASSIGN expression SEMICOLON  */
-#line 89 "parser.y"
-                                           {
-        risk_table[(yyvsp[-3].str)] = current_expr_risk;
-        if(current_expr_risk > 0)
-            log_event("Taint spread to '" + string((yyvsp[-3].str)) + "' (Risk Level: " + to_string(current_expr_risk) + ")");
-        else
-            log_event("Variable '" + string((yyvsp[-3].str)) + "' reset to CLEAN.");
-        current_expr_risk = 0;
-    }
-#line 1159 "parser.tab.c"
-    break;
-
-  case 10: /* expression: INPUT_FUNC LPAREN RPAREN  */
-#line 100 "parser.y"
-                             { 
-        current_expr_risk = 2; // Direct input is CRITICAL
-    }
-#line 1167 "parser.tab.c"
-    break;
-
-  case 11: /* expression: IDENTIFIER  */
-#line 103 "parser.y"
-                 { 
-        if (risk_table.count((yyvsp[0].str)) && risk_table[(yyvsp[0].str)] > 0) {
-            current_expr_risk = 1; // Propagated data is HIGH
+  case 15: /* js_statement: VAR_DECL IDENTIFIER ASSIGN IDENTIFIER DOT_GET_ITEM LPAREN STRING_LITERAL RPAREN SEMICOLON  */
+#line 209 "parser.y"
+                                                                                                {
+        string dest((yyvsp[-7].str)), src((yyvsp[-5].str)), key((yyvsp[-2].str));
+        if (risk_map[src] >= 1) {
+            risk_map[dest]   = 2;
+            origin_map[dest] = "'" + src + "'.getItem(" + key + ")";
+            log_info("Taint propagated: '" + dest + "' ← " + origin_map[dest]);
         }
+        emit("  const " + dest + " = " + src + ".getItem(" + key + ");\n");
     }
-#line 1177 "parser.tab.c"
+#line 1364 "parser.tab.c"
     break;
 
-  case 12: /* expression: SANITIZE_FUNC LPAREN IDENTIFIER RPAREN  */
-#line 108 "parser.y"
+  case 16: /* js_statement: VAR_DECL IDENTIFIER ASSIGN IDENTIFIER PLUS STRING_LITERAL SEMICOLON  */
+#line 220 "parser.y"
+                                                                          {
+        string dest((yyvsp[-5].str)), src((yyvsp[-3].str)), suffix((yyvsp[-1].str));
+        if (risk_map[src] >= 1) {
+            risk_map[dest]   = 2;
+            origin_map[dest] = "concat of tainted '" + src + "'";
+            log_warning("Taint via concatenation: '" + dest + "' = '" + src + "' + literal");
+        }
+        emit("  const " + dest + " = " + src + " + " + suffix + ";\n");
+    }
+#line 1378 "parser.tab.c"
+    break;
+
+  case 17: /* js_statement: IDENTIFIER ASSIGN_PLUS IDENTIFIER SEMICOLON  */
+#line 231 "parser.y"
+                                                  {
+        string dest((yyvsp[-3].str)), src((yyvsp[-1].str));
+        if (risk_map[src] >= 1 && risk_map[dest] < 2) {
+            risk_map[dest]   = 2;
+            origin_map[dest] = "concat-assign from tainted '" + src + "'";
+            log_warning("Taint via += assignment: '" + dest + "' now tainted");
+        }
+        emit("  " + dest + " += " + src + ";\n");
+    }
+#line 1392 "parser.tab.c"
+    break;
+
+  case 18: /* js_statement: VAR_DECL IDENTIFIER ASSIGN IDENTIFIER SEMICOLON  */
+#line 242 "parser.y"
+                                                      {
+        string dest((yyvsp[-3].str)), src((yyvsp[-1].str));
+        if (risk_map[src] >= 1) {
+            risk_map[dest]   = risk_map[src];
+            origin_map[dest] = "copy of tainted '" + src + "'";
+            log_info("Taint copied: '" + dest + "' ← '" + src + "'");
+        }
+        emit("  const " + dest + " = " + src + ";\n");
+    }
+#line 1406 "parser.tab.c"
+    break;
+
+  case 19: /* js_statement: IDENTIFIER ASSIGN IDENTIFIER SEMICOLON  */
+#line 253 "parser.y"
                                              {
-        risk_table[(yyvsp[-1].str)] = 0;
-        current_expr_risk = 0;
-        log_event("Sanitization verified for '" + string((yyvsp[-1].str)) + "'.");
+        string dest((yyvsp[-3].str)), src((yyvsp[-1].str));
+        if (risk_map[src] >= 1 && risk_map[dest] < risk_map[src]) {
+            risk_map[dest]   = risk_map[src];
+            origin_map[dest] = "reassign from tainted '" + src + "'";
+            log_info("Taint propagated via reassign: '" + dest + "' ← '" + src + "'");
+        }
+        emit("  " + dest + " = " + src + ";\n");
     }
-#line 1187 "parser.tab.c"
+#line 1420 "parser.tab.c"
     break;
 
-  case 13: /* sink_call: RENDER_FUNC LPAREN IDENTIFIER RPAREN SEMICOLON  */
-#line 116 "parser.y"
-                                                   {
-        if (risk_table.count((yyvsp[-2].str)) && risk_table[(yyvsp[-2].str)] > 0) {
-            log_event("!!! SECURITY VIOLATION !!! Rendered: " + string((yyvsp[-2].str)));
-            suggest_fix((yyvsp[-2].str), risk_table[(yyvsp[-2].str)]); 
+  case 20: /* js_statement: IF_TOK LPAREN IDENTIFIER RPAREN LBRACE js_statement RBRACE  */
+#line 264 "parser.y"
+                                                                 {
+        emit("");
+    }
+#line 1428 "parser.tab.c"
+    break;
+
+  case 21: /* js_statement: DOC_GET_ELEM_BY_ID LPAREN STRING_LITERAL RPAREN DOT_INNER_HTML ASSIGN IDENTIFIER SEMICOLON  */
+#line 269 "parser.y"
+                                                                                                 {
+        string elem_id((yyvsp[-5].str)), var((yyvsp[-1].str));
+        string elem_expr = "document.getElementById(" + elem_id + ")";
+        if (risk_map[var] >= 2) {
+            log_critical("XSS SINK .innerHTML: tainted var '" + var
+                         + "' (origin: " + origin_map[var] + ") → elem #"
+                         + elem_id);
+            emit("  " + safe_sink(".innerHTML", elem_id, var, elem_expr) + "\n");
         } else {
-            log_event("Safe Render: " + string((yyvsp[-2].str)));
+            emit("  " + elem_expr + ".innerHTML = " + var + ";\n");
         }
     }
-#line 1200 "parser.tab.c"
+#line 1445 "parser.tab.c"
+    break;
+
+  case 22: /* js_statement: DOC_GET_ELEM_BY_ID LPAREN STRING_LITERAL RPAREN DOT_OUTER_HTML ASSIGN IDENTIFIER SEMICOLON  */
+#line 283 "parser.y"
+                                                                                                 {
+        string elem_id((yyvsp[-5].str)), var((yyvsp[-1].str));
+        string elem_expr = "document.getElementById(" + elem_id + ")";
+        if (risk_map[var] >= 2) {
+            log_critical("XSS SINK .outerHTML: tainted var '" + var
+                         + "' → elem #" + elem_id);
+            emit("  " + safe_sink(".outerHTML", elem_id, var, elem_expr) + "\n");
+        } else {
+            emit("  " + elem_expr + ".outerHTML = " + var + ";\n");
+        }
+    }
+#line 1461 "parser.tab.c"
+    break;
+
+  case 23: /* js_statement: EVAL_TOK LPAREN IDENTIFIER RPAREN SEMICOLON  */
+#line 296 "parser.y"
+                                                  {
+        string var((yyvsp[-2].str));
+        if (risk_map[var] >= 2) {
+            log_critical("XSS SINK eval(): tainted var '" + var
+                         + "' (origin: " + origin_map[var] + ")");
+            emit("  " + safe_sink("eval", "", var, "") + "\n");
+        } else {
+            emit("  eval(" + var + ");\n");
+        }
+    }
+#line 1476 "parser.tab.c"
+    break;
+
+  case 24: /* js_statement: DOC_WRITE LPAREN IDENTIFIER RPAREN SEMICOLON  */
+#line 308 "parser.y"
+                                                   {
+        string var((yyvsp[-2].str));
+        if (risk_map[var] >= 2) {
+            log_critical("XSS SINK document.write(): tainted var '" + var + "'");
+            emit("  " + safe_sink("document.write", "", var, "") + "\n");
+        } else {
+            emit("  document.write(" + var + ");\n");
+        }
+    }
+#line 1490 "parser.tab.c"
+    break;
+
+  case 25: /* js_statement: IDENTIFIER DOT_HREF ASSIGN IDENTIFIER SEMICOLON  */
+#line 319 "parser.y"
+                                                      {
+        string target((yyvsp[-4].str)), var((yyvsp[-1].str));
+        if (risk_map[var] >= 2) {
+            log_critical("XSS SINK .href: tainted var '" + var
+                         + "' assigned to '" + target + ".href'");
+            emit("  " + safe_sink(".href", "", var, target) + "\n");
+        } else {
+            emit("  " + target + ".href = " + var + ";\n");
+        }
+    }
+#line 1505 "parser.tab.c"
+    break;
+
+  case 26: /* js_statement: LOCATION_HREF ASSIGN IDENTIFIER SEMICOLON  */
+#line 331 "parser.y"
+                                                {
+        string var((yyvsp[-1].str));
+        if (risk_map[var] >= 2) {
+            log_critical("XSS SINK location.href: tainted var '" + var + "'");
+            emit("  /* AUTO-FIXED: location.href blocked for tainted var '"
+                 + var + "' */\n");
+        } else {
+            emit("  location.href = " + var + ";\n");
+        }
+    }
+#line 1520 "parser.tab.c"
     break;
 
 
-#line 1204 "parser.tab.c"
+#line 1524 "parser.tab.c"
 
       default: break;
     }
@@ -1393,18 +1713,10 @@ yyreturnlab:
   return yyresult;
 }
 
-#line 126 "parser.y"
+#line 344 "parser.y"
 
-
-// --- C++ FUNCTION DEFINITIONS (CRITICAL FOR LINKER) ---
-
-void yyerror(const char *s) {
-    fprintf(stderr, "Syntax Error: %s\n", s);
-}
 
 int main() {
-    cout << "--- AI-Assisted Security Compiler: Taint Analysis Mode ---" << endl;
-    cout << "Targeting: XSS Vulnerability Detection\n" << endl;
     yyparse();
     return 0;
 }
